@@ -133,7 +133,9 @@ window.__ModuleLoader__.load({
           label: avail >= 99.9 ? '全部可用' : `可用 ${avail}%`,
         };
       }
-      const cooling = w?.display === '冷却中' || w?.holdsWhy === 'clock';
+      // holdsWhy 只表示「窗口总量无法估算的原因」（low/clock/log/none/credits），
+      // 与账号是否冷却无关，不能据此渲染冷却态。
+      const cooling = w?.display === '冷却中';
       const used = Math.round((Number.isFinite(w?.used) ? w.used : 0) * 10) / 10;
       const rem = Math.round((Number.isFinite(w?.remaining) ? w.remaining : 100 - used) * 10) / 10;
       if (cooling) {
@@ -169,7 +171,7 @@ window.__ModuleLoader__.load({
         ? providerAccounts
         : [item].filter(Boolean);
       const total = list.length || 1;
-      const cooling = list.filter((a) => (a.windows || []).some((w) => w.display === '冷却中' || w.holdsWhy === 'clock')).length;
+      const cooling = list.filter((a) => (a.windows || []).some((w) => w.display === '冷却中')).length;
       const usable = Math.max(0, total - cooling);
       const usedPct = Math.round((cooling / total) * 1000) / 10;
       return [{
@@ -206,7 +208,7 @@ window.__ModuleLoader__.load({
       for (const [name, list] of windowMap) {
         if (list.length === 0) continue;
 
-        const allCooling = list.every((w) => w.display === '冷却中' || w.holdsWhy === 'clock');
+        const allCooling = list.every((w) => w.display === '冷却中');
         // 冷却型窗口（如 Google AI Studio 的 429 冷却）只出现在出问题的账号上，其余账号的
         // windows 里根本没有这一项。分母必须取该 Provider 的全部账号，否则 1/N 个账号冷却
         // 会被算成整池 100% 冷却。
@@ -250,7 +252,6 @@ window.__ModuleLoader__.load({
           remaining: remainPct,
           resetsAt: validResets[0] || null,
           display: fullyCooling ? '冷却中' : undefined,
-          holdsWhy: fullyCooling ? 'clock' : 'none',
           accountCount: list.length,
         });
       }
@@ -266,7 +267,6 @@ window.__ModuleLoader__.load({
             remaining: 100,
             resetsAt: null,
             display: `${total}/${total} 个账号可用 · 无冷却`,
-            holdsWhy: 'none',
             accountCount: total,
             synthetic: true,
           });
@@ -732,7 +732,7 @@ window.__ModuleLoader__.load({
         return list;
       }, [data, pinnedProvider, sessionProviderItem]);
 
-      const isCooling = activeWindow?.display === '冷却中' || activeWindow?.holdsWhy === 'clock';
+      const isCooling = activeWindow?.display === '冷却中';
       const isSynthetic = Boolean(activeWindow?.synthetic);
       const usedPct = activeWindow && Number.isFinite(activeWindow.used) ? Math.round(activeWindow.used) : 0;
       const remainPct = activeWindow && Number.isFinite(activeWindow.remaining) ? Math.round(activeWindow.remaining) : 0;
