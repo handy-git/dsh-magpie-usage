@@ -102,6 +102,91 @@ window.__ModuleLoader__.load({
       return '#818cf8';
     }
 
+    // 额度窗口/套餐的中文展示名；服务商与渠道名保持原样。
+    const WINDOW_NAME_ZH = {
+      credits: '积分',
+      'extra credits': '额外积分',
+      'total credits': '积分合计',
+      'free model tokens': '免费模型额度',
+      'add-on credits': '加购积分',
+      'dollar usage': '美元用量',
+    };
+    const PLAN_NAME_ZH = {
+      'free plan': '免费版',
+      'personal_standard': '个人标准版',
+      'personal_pro': '个人专业版',
+      team: '团队版',
+      enterprise: '企业版',
+      credits: '积分套餐',
+      subscription: '订阅',
+    };
+    const UNIT_NAME_ZH = { credits: '积分', usd: '美元', tokens: '词元' };
+    const COMPACT_NUMBER_ZH = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 });
+    const PLAIN_NUMBER_ZH = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 });
+    const PLAIN_NUMBER_ZH_2 = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 });
+
+    function displayWindowName(name) {
+      const raw = String(name || '').trim();
+      const key = raw.toLowerCase();
+      if (WINDOW_NAME_ZH[key]) return WINDOW_NAME_ZH[key];
+      const m = /^(\d+)\s*[- ]?\s*(hour|day|week|month)s?$/i.exec(raw);
+      if (m) {
+        const unit = { hour: '小时', day: '天', week: '周', month: '个月' }[m[2].toLowerCase()];
+        return `${m[1]} ${unit}`;
+      }
+      return raw;
+    }
+
+    function displayPlanName(plan) {
+      const raw = String(plan || '').trim();
+      return PLAN_NAME_ZH[raw.toLowerCase()] || raw;
+    }
+
+    function formatQuotaNumber(value) {
+      if (!Number.isFinite(value)) return '--';
+      if (value >= 10000) return COMPACT_NUMBER_ZH.format(value);
+      return (value < 100 ? PLAIN_NUMBER_ZH_2 : PLAIN_NUMBER_ZH).format(value);
+    }
+
+    // amount 是已用额度，limit 是总额度；上游未给 amount 时按百分比反推。
+    function windowAmounts(w) {
+      const limit = Number.isFinite(w?.limit) && w.limit > 0 ? w.limit : null;
+      let usedAmount = Number.isFinite(w?.amount) ? w.amount : null;
+      if (usedAmount == null && limit != null && Number.isFinite(w?.used)) {
+        usedAmount = (w.used * limit) / 100;
+      }
+      const remainingAmount = limit != null && usedAmount != null
+        ? Math.max(0, limit - usedAmount)
+        : null;
+      return { limit, usedAmount, remainingAmount, unit: w?.unit };
+    }
+
+    function unitName(unit) {
+      return UNIT_NAME_ZH[unit] || '';
+    }
+
+    // 状态栏空间有限：积分省略单位，美元/词元保留单位。
+    function dockRemainingText(w) {
+      const { remainingAmount, unit } = windowAmounts(w);
+      if (remainingAmount == null) return '';
+      const suffix = unit && unit !== 'credits' ? ` ${unitName(unit)}` : '';
+      return `剩余 ${formatQuotaNumber(remainingAmount)}${suffix}`;
+    }
+
+    function remainingAmountText(w) {
+      const { remainingAmount, unit } = windowAmounts(w);
+      if (remainingAmount == null) return '';
+      const suffix = unit ? ` ${unitName(unit)}` : '';
+      return `剩余 ${formatQuotaNumber(remainingAmount)}${suffix}`;
+    }
+
+    function remainingOfTotalText(w) {
+      const { remainingAmount, limit, unit } = windowAmounts(w);
+      if (remainingAmount == null || limit == null) return '';
+      const suffix = unit ? ` ${unitName(unit)}` : '';
+      return `剩余 ${formatQuotaNumber(remainingAmount)} / ${formatQuotaNumber(limit)}${suffix}`;
+    }
+
     function isQuotaWindow(w) {
       if (!w || typeof w !== 'object') return false;
       if (typeof w.display === 'string' && /^https?:\/\//i.test(w.display.trim())) return false;
@@ -216,6 +301,9 @@ window.__ModuleLoader__.load({
 
         let usedPct = 0;
         let remainPct = 0;
+        let totalLimit = null;
+        let totalAmount = null;
+        let mergedUnit;
 
         if (coolingOnly) {
           usedPct = (list.length / serving) * 100;
@@ -223,14 +311,16 @@ window.__ModuleLoader__.load({
         } else {
           const hasLimits = list.every((w) => Number.isFinite(w.limit) && w.limit > 0);
           if (hasLimits) {
-            const totalLimit = list.reduce((sum, w) => sum + w.limit, 0);
-            const totalAmount = list.reduce((sum, w) => {
+            totalLimit = list.reduce((sum, w) => sum + w.limit, 0);
+            totalAmount = list.reduce((sum, w) => {
               if (Number.isFinite(w.amount)) return sum + w.amount;
               if (Number.isFinite(w.used)) return sum + (w.used * w.limit) / 100;
               return sum;
             }, 0);
             usedPct = totalLimit > 0 ? (totalAmount / totalLimit) * 100 : 0;
             remainPct = 100 - usedPct;
+            const units = [...new Set(list.map((w) => w.unit).filter(Boolean))];
+            mergedUnit = units.length === 1 ? units[0] : undefined;
           } else {
             const validUsed = list.filter((w) => Number.isFinite(w.used));
             usedPct = validUsed.length > 0 ? validUsed.reduce((sum, w) => sum + w.used, 0) / validUsed.length : 0;
@@ -252,6 +342,9 @@ window.__ModuleLoader__.load({
           remaining: remainPct,
           resetsAt: validResets[0] || null,
           display: fullyCooling ? '冷却中' : undefined,
+          limit: totalLimit,
+          amount: totalAmount,
+          unit: mergedUnit,
           accountCount: list.length,
         });
       }
@@ -752,19 +845,22 @@ window.__ModuleLoader__.load({
               ? (usedPct > 85 ? '#f87171' : usedPct > 65 ? '#fbbf24' : getBrandColor(activeItem?.provider))
               : (remainPct < 15 ? '#f87171' : remainPct < 35 ? '#fbbf24' : '#34d399'));
 
+      const amountText = activeWindow && !isCooling && !isSynthetic
+        ? dockRemainingText(activeWindow)
+        : '';
       const textValue = !activeWindow
         ? '--'
         : isCooling
           ? '冷却'
           : isSynthetic
             ? (remainPct >= 99.9 ? '可用' : `可用 ${remainPct}%`)
-            : `${barPct}%`;
+            : (amountText ? `${barPct}% · ${amountText}` : `${barPct}%`);
       // 合成窗口说的是「可用度」，标题里不再套「已用/剩余」前缀，避免出现「已用 可用」。
       const titleDetail = !activeWindow
         ? '无可用额度窗口'
         : isSynthetic
           ? (remainPct >= 99.9 ? '全部账号可用' : `可用 ${remainPct}%`)
-          : `(${viewMode === 'used' ? '已用' : '剩余'} ${textValue})`;
+          : `(${viewMode === 'used' ? '已用' : '剩余'} ${barPct}%${amountText ? ` · ${remainingOfTotalText(activeWindow)}` : ''})`;
 
       const strokeDash = `${(CIRCUMFERENCE * Math.min(100, Math.max(0, barPct))) / 100} ${CIRCUMFERENCE}`;
 
@@ -866,7 +962,7 @@ window.__ModuleLoader__.load({
             backdropFilter: 'blur(20px)',
             WebkitBackdropFilter: 'blur(20px)',
             animation: 'dsh-fade-in 0.16s cubic-bezier(0.16, 1, 0.3, 1)',
-            minWidth: '150px',
+            minWidth: '230px',
           },
         },
           (() => {
@@ -885,7 +981,8 @@ window.__ModuleLoader__.load({
               const pct = st.pct;
               const color = st.color;
 
-              const cleanName = defaultLabel || (w.synthetic ? '可用' : (w.name.includes('5') ? '5小时' : w.name.includes('7') ? '7天' : w.name));
+              const cleanName = defaultLabel || (w.synthetic ? '可用' : displayWindowName(w.name));
+              const amountText = remainingAmountText(w);
               const timeStr = isCool ? '冷却中' : (w.resetsAt ? `${formatRelative(w.resetsAt)}重置` : '长期');
 
               return h('div', {
@@ -894,7 +991,7 @@ window.__ModuleLoader__.load({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  gap: '12px',
+                  gap: '8px',
                   fontSize: '11px',
                   lineHeight: '1.4',
                 },
@@ -907,6 +1004,9 @@ window.__ModuleLoader__.load({
                     fontVariantNumeric: 'tabular-nums',
                   },
                 }, isCool ? '冷却' : (w.synthetic ? '可用' : `${pct}%`)),
+                amountText && h('span', {
+                  style: { color: THEME.textSecondary, fontSize: '10px', fontVariantNumeric: 'tabular-nums' },
+                }, amountText),
                 h('span', { style: { color: THEME.textTertiary, fontSize: '10px', textAlign: 'right' } }, timeStr)
               );
             };
@@ -946,9 +1046,9 @@ window.__ModuleLoader__.load({
               // 数据行
               fiveHourWin ? [
                 renderRow(fiveHourWin, '5小时'),
-                longerWin && longerWin !== fiveHourWin && renderRow(longerWin, longerWin.name.includes('7') ? '7天' : longerWin.name),
+                longerWin && longerWin !== fiveHourWin && renderRow(longerWin, longerWin.name.includes('7') ? '7天' : displayWindowName(longerWin.name)),
               ] : [
-                renderRow(activeWindow, activeWindow?.name),
+                renderRow(activeWindow, activeWindow ? displayWindowName(activeWindow.name) : undefined),
               ]
             );
           })()
@@ -1222,19 +1322,19 @@ window.__ModuleLoader__.load({
                         padding: '2px 6px',
                         borderRadius: '4px',
                       },
-                    }, item.plan || item.kind)
+                    }, displayPlanName(item.plan || item.kind))
                   )
                 ),
 
                 // 账号行
-                item.user && h('div', {
+                (item.alias || item.user) && h('div', {
                   style: {
                     fontSize: '11px',
                     color: THEME.textSecondary,
                     marginTop: '4px',
                     fontFamily: 'ui-monospace, SFMono-Regular, monospace',
                   },
-                }, maskEmail(item.user, true)),
+                }, maskEmail(item.alias || item.user, true)),
 
                 // 进度条渲染
                 hasWindows ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
@@ -1255,19 +1355,27 @@ window.__ModuleLoader__.load({
                         const pct = st.pct;
                         const label = st.label;
                         const barColor = st.color;
+                        const amountText = remainingAmountText(w);
+                        const amountDetail = remainingOfTotalText(w);
 
-                        return h('div', { key: w.name + wIdx, style: { marginTop: '4px' } },
+                        return h('div', {
+                          key: w.name + wIdx,
+                          title: amountDetail,
+                          style: { marginTop: '4px' },
+                        },
                           h('div', {
                             style: {
                               display: 'flex',
                               justifyContent: 'space-between',
                               alignItems: 'baseline',
+                              gap: '6px',
+                              flexWrap: 'wrap',
                               fontSize: '11px',
                               marginBottom: '4px',
                             },
                           },
                             h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
-                              h('span', { style: { color: THEME.textPrimary, fontWeight: 500 } }, w.name),
+                              h('span', { style: { color: THEME.textPrimary, fontWeight: 500 } }, displayWindowName(w.name)),
                               isCooling && h('span', {
                                 style: {
                                   fontSize: '10px',
@@ -1279,7 +1387,16 @@ window.__ModuleLoader__.load({
                                 },
                               }, '冷却中')
                             ),
-                            h('b', { style: { color: barColor, fontVariantNumeric: 'tabular-nums' } }, label)
+                            h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '6px' } },
+                              h('b', { style: { color: barColor, fontVariantNumeric: 'tabular-nums' } }, label),
+                              amountText && h('span', {
+                                style: {
+                                  fontSize: '10px',
+                                  color: THEME.textSecondary,
+                                  fontVariantNumeric: 'tabular-nums',
+                                },
+                              }, amountText)
+                            )
                           ),
                           // 进度条槽
                           h('div', {
