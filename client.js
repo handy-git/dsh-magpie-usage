@@ -372,10 +372,9 @@ window.__ModuleLoader__.load({
     // ----------------------------------------------------
     // 单例会话模型嗅探 (带快速缓存与防抖过滤)
     // ----------------------------------------------------
-    function detectActiveSessionProvider(data) {
-      if (typeof document === 'undefined' || !Array.isArray(data) || data.length === 0) return null;
+    function readActiveModelContext() {
+      if (typeof document === 'undefined') return { modelId: '', labelText: '' };
 
-      // 1. 优先读取输入栏专属属性
       let modelId = '';
       let labelText = '';
       const modelSpan = document.querySelector('[data-model-id]');
@@ -383,7 +382,6 @@ window.__ModuleLoader__.load({
         modelId = modelSpan.getAttribute('data-model-id') || '';
       }
 
-      // 2. 读取模型选择器按钮的标题或文本
       const triggerBtn = document.querySelector('button[aria-haspopup="menu"][title*="·"]') ||
                          document.querySelector('button[data-selection-focus]') ||
                          document.querySelector('[class*="trigger"][title*="·"]');
@@ -391,8 +389,18 @@ window.__ModuleLoader__.load({
         labelText = (triggerBtn.getAttribute('title') || '') + ' ' + (triggerBtn.textContent || '');
       }
 
+      return { modelId, labelText };
+    }
+
+    function detectActiveSessionProvider(data, context) {
+      if (!Array.isArray(data) || data.length === 0) return null;
+
+      const { modelId = '', labelText = '' } = context || readActiveModelContext();
       const m = modelId.toLowerCase();
       const t = labelText.toLowerCase();
+
+      // group/auto-* 是 Magpie 的动态路由分组，不能当作 Provider；交给请求日志解析。
+      if (m.startsWith('group/')) return null;
 
       // A. 按 modelId 前缀精准匹配（如 "kiro/claude-opus-5.5" -> "kiro"）
       const prefix = m.split('/')[0];
@@ -433,6 +441,30 @@ window.__ModuleLoader__.load({
       return null;
     }
 
+    // 手动选择的直连模型可能带 provider 前缀；自动分组只能靠 Magpie 的请求日志映射。
+    function findProviderByRoute(data, route) {
+      if (!Array.isArray(data) || !route) return null;
+      const provider = String(route.provider || '').toLowerCase();
+      const name = String(route.providerName || '').toLowerCase();
+
+      if (provider) {
+        const exact = data.find((d) => String(d.provider || '').toLowerCase() === provider);
+        if (exact) return exact;
+      }
+      if (name) {
+        const byName = data.find((d) => String(d.name || '').toLowerCase() === name);
+        if (byName) return byName;
+      }
+      if (provider) {
+        const byPrefix = data.find((d) => {
+          const id = String(d.provider || '').toLowerCase();
+          return id && (id.startsWith(provider) || provider.startsWith(id));
+        });
+        if (byPrefix) return byPrefix;
+      }
+      return null;
+    }
+
     // ----------------------------------------------------
     // 数据共享中心 (全单例调度，避免重复开销)
     // ----------------------------------------------------
@@ -456,6 +488,7 @@ window.__ModuleLoader__.load({
         try { return localStorage.getItem(PINNED_STORAGE_KEY) || ''; } catch { return ''; }
       })(),
       activeSessionProviderId: null,
+      activeSessionSource: null,
       listeners: new Set(),
     };
 
@@ -487,17 +520,83 @@ window.__ModuleLoader__.load({
     // ----------------------------------------------------
     // 全局单例模型追踪器 (带 150ms 防抖，Token 生成流期间 0% 开销)
     // ----------------------------------------------------
-    let lastTrackedId = null;
+    const ROUTE_REFRESH_MS = 10_000;
     let debounceTimer = null;
+    let lastRouteReq = '';
+    let lastRouteAt = 0;
+    let lastRouteResult = null;
+    let routeAbortController = null;
+    let routeSeq = 0;
+
+    function updateActiveSession(providerId, source) {
+      const nextId = providerId || null;
+      const nextSource = nextId ? source : null;
+      if (nextId === sharedState.activeSessionProviderId && nextSource === sharedState.activeSessionSource) return;
+      sharedState.activeSessionProviderId = nextId;
+      sharedState.activeSessionSource = nextSource;
+      notify();
+    }
+
+    // 自动分组没有稳定的 Provider，只能查 Magpie 最近一次实际路由。
+    async function resolveRouteProvider(modelId, force = false) {
+      const req = String(modelId || '').trim();
+      if (!req) return;
+
+      const now = Date.now();
+      if (!force && req === lastRouteReq && now - lastRouteAt < ROUTE_REFRESH_MS) return;
+
+      lastRouteReq = req;
+      lastRouteAt = now;
+
+      if (routeAbortController) routeAbortController.abort();
+      const controller = new AbortController();
+      routeAbortController = controller;
+      const seq = ++routeSeq;
+
+      try {
+        const res = await fetch(`/api/magpie-quota/last-route?req=${encodeURIComponent(req)}`, {
+          signal: controller.signal,
+        });
+        const json = await res.json();
+        if (seq !== routeSeq) return;
+        lastRouteResult = json?.ok ? json : null;
+        if (!json?.ok || !json?.provider) return;
+
+        const currentModel = readActiveModelContext().modelId;
+        if (currentModel && currentModel !== req) return;
+
+        const item = findProviderByRoute(sharedState.data, json);
+        if (!item) return;
+        updateActiveSession(item.provider || item.name, 'route');
+      } catch (err) {
+        if (err?.name !== 'AbortError') {
+          // 路由查询只是尽力而为，失败时保留上一次已解析的 Provider。
+        }
+      } finally {
+        if (seq === routeSeq) routeAbortController = null;
+      }
+    }
 
     function checkActiveSessionModelNow() {
       if (typeof document === 'undefined') return;
-      const detected = detectActiveSessionProvider(sharedState.data);
-      const nextId = detected ? (detected.provider || detected.name) : null;
-      if (nextId !== lastTrackedId) {
-        lastTrackedId = nextId;
-        sharedState.activeSessionProviderId = nextId;
-        notify();
+
+      const context = readActiveModelContext();
+      const detected = detectActiveSessionProvider(sharedState.data, context);
+      if (detected) {
+        updateActiveSession(detected.provider || detected.name, 'model');
+        return;
+      }
+
+      if (context.modelId && lastRouteResult?.req === context.modelId) {
+        const item = findProviderByRoute(sharedState.data, lastRouteResult);
+        if (item) {
+          updateActiveSession(item.provider || item.name, 'route');
+          return;
+        }
+      }
+
+      if (context.modelId) {
+        resolveRouteProvider(context.modelId, false);
       }
     }
 
@@ -698,7 +797,8 @@ window.__ModuleLoader__.load({
     // 底部状态栏圆环组件 (位于 ContextMeter 旁边)
     // ----------------------------------------------------
     function QuotaDockItem() {
-      const { data, loading, error, updatedAt, viewMode, setViewMode, pinnedProvider, setPinned, refresh, activeSessionProviderId } = useMagpieQuotas();
+      const { data, loading, error, updatedAt, viewMode, setViewMode, pinnedProvider, setPinned, refresh, activeSessionProviderId, activeSessionSource } = useMagpieQuotas();
+      const sessionLabel = activeSessionSource === 'route' ? '最近路由' : '当前会话';
       const [open, setOpen] = React.useState(false);
       const [showHoverTip, setShowHoverTip] = React.useState(false);
       const hoverTimerRef = React.useRef(null);
@@ -885,7 +985,7 @@ window.__ModuleLoader__.load({
           onMouseLeave: handleMouseLeave,
           title: isPinned
             ? `[固定置顶] ${activeItem?.name}${accountCount > 1 ? ` (${accountCount}账号合并)` : ''}: ${titleDetail}`
-            : `[当前会话模型] ${activeItem?.name}${accountCount > 1 ? ` (${accountCount}账号合并)` : ''}: ${titleDetail}`,
+            : `[${sessionLabel}] ${activeItem?.name}${accountCount > 1 ? ` (${accountCount}账号合并)` : ''}: ${titleDetail}`,
           style: {
             border: 'none',
             background: open ? 'var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.08))' : 'transparent',
@@ -1169,7 +1269,7 @@ window.__ModuleLoader__.load({
               h('span', null, `已置顶显示: ${activeItem?.name}`),
               sessionProviderItem && (sessionProviderItem.provider !== activeItem?.provider) && h('span', {
                 style: { opacity: 0.65, fontSize: '10px', color: THEME.textTertiary, marginLeft: '4px' },
-              }, `(当前会话为 ${sessionProviderItem.name})`)
+              }, `(${sessionLabel}为 ${sessionProviderItem.name})`)
             ),
             h('button', {
               onClick: () => setPinned(pinnedProvider),
@@ -1197,7 +1297,7 @@ window.__ModuleLoader__.load({
           },
             h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
               h(BoltIcon, { size: 12, style: { color: '#34d399' } }),
-              h('span', null, `跟随当前会话模型: ${activeItem?.name || '自动'}`)
+              h('span', null, `跟随${sessionLabel}: ${activeItem?.name || '自动'}`)
             ),
             h('span', { style: { opacity: 0.6, fontSize: '10px' } }, '点卡片 📌 可固定置顶')
           ),
@@ -1271,7 +1371,7 @@ window.__ModuleLoader__.load({
                   // 右侧操作项: 当前会话使用标签 + 置顶按钮 + 套餐标签
                   h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
                     thisIsSessionModel && h('span', {
-                      title: '当前会话模型使用的 Provider',
+                      title: activeSessionSource === 'route' ? '最近一次请求路由到的 Provider' : '当前会话模型使用的 Provider',
                       style: {
                         fontSize: '10px',
                         color: '#34d399',
@@ -1286,7 +1386,7 @@ window.__ModuleLoader__.load({
                       },
                     },
                       h('span', { style: { width: '4px', height: '4px', borderRadius: '50%', background: '#34d399' } }),
-                      h('span', null, '当前会话')
+                      h('span', null, sessionLabel)
                     ),
                     // 置顶按钮
                     h('button', {
