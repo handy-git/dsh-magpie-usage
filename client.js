@@ -560,14 +560,12 @@ window.__ModuleLoader__.load({
         const json = await res.json();
         if (seq !== routeSeq) return;
         lastRouteResult = json?.ok ? json : null;
-        if (!json?.ok || !json?.provider) return;
 
         const currentModel = readActiveModelContext().modelId;
-        if (currentModel && currentModel !== req) return;
+        if (currentModel !== req) return;
 
-        const item = findProviderByRoute(sharedState.data, json);
-        if (!item) return;
-        updateActiveSession(item.provider || item.name, 'route');
+        const item = json?.ok ? findProviderByRoute(sharedState.data, json) : null;
+        updateActiveSession(item ? (item.provider || item.name) : null, 'route');
       } catch (err) {
         if (err?.name !== 'AbortError') {
           // 路由查询只是尽力而为，失败时保留上一次已解析的 Provider。
@@ -578,7 +576,7 @@ window.__ModuleLoader__.load({
     }
 
     function checkActiveSessionModelNow() {
-      if (typeof document === 'undefined') return;
+      if (typeof document === 'undefined' || document.hidden) return;
 
       const context = readActiveModelContext();
       const detected = detectActiveSessionProvider(sharedState.data, context);
@@ -587,14 +585,13 @@ window.__ModuleLoader__.load({
         return;
       }
 
-      if (context.modelId && lastRouteResult?.req === context.modelId) {
-        const item = findProviderByRoute(sharedState.data, lastRouteResult);
-        if (item) {
-          updateActiveSession(item.provider || item.name, 'route');
-          return;
-        }
-      }
+      const cachedItem = context.modelId && lastRouteResult?.req === context.modelId
+        ? findProviderByRoute(sharedState.data, lastRouteResult)
+        : null;
+      updateActiveSession(cachedItem ? (cachedItem.provider || cachedItem.name) : null, 'route');
 
+      // 展示同一模型的缓存，同时让查询函数检查 TTL，避免一次命中后永不刷新。
+      // 模型切换或会话为空时，先清除不属于当前模型的 Provider。
       if (context.modelId) {
         resolveRouteProvider(context.modelId, false);
       }
