@@ -226,3 +226,42 @@ test('popover renders with a matching palette on light and dark hosts', () => {
   assert.ok(!dark.includes('rgba(255, 255, 255, 0.97)'), 'dark host: no light surface');
   assert.ok(dark.includes('#34d399') || dark.includes('#dc2626'), 'dark host: status colors stay vivid');
 });
+
+test('a balance-only provider synthesizes a 余额 window (QwenWork)', () => {
+  const { api } = harness();
+  const merged = api.mergeProviderWindows([
+    { provider: 'qwenwork', windows: [], balance: '2019.97 credits (monthly 100 · long-term 1924.97)' },
+  ]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].balance, true);
+  assert.equal(merged[0].limit, 2019.97);
+  assert.equal(merged[0].unit, 'credits');
+  assert.equal(merged[0].balanceDetail, 'monthly 100 · long-term 1924.97');
+  const st = api.windowStats(merged[0], 'used', 'brand');
+  assert.equal(st.balance, true);
+  assert.equal(st.pct, null, 'balance has no percentage');
+  assert.ok(st.label.includes('余额'));
+});
+
+test('balance strings parse commas, dollars and raw units', () => {
+  const { api } = harness();
+  const merged = api.mergeProviderWindows([
+    { provider: 'wps', windows: [], balance: '3,376 智点' },
+    { provider: 'wps', windows: [], balance: '100 智点' },
+  ]);
+  assert.equal(merged[0].limit, 3476);
+  assert.equal(merged[0].unit, '智点');
+  const usd = api.mergeProviderWindows([{ windows: [], balance: '$0.00' }]);
+  assert.equal(usd[0].limit, 0);
+  assert.equal(usd[0].unit, 'usd');
+});
+
+test('providers with real windows ignore the balance string', () => {
+  const { api } = harness();
+  const merged = api.mergeProviderWindows([
+    { windows: [{ name: '智点', used: 0.7, remaining: 99.3, amount: 24, limit: 3400, unit: '智点' }], balance: '3,376 智点' },
+  ]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].name, '智点');
+  assert.equal(merged[0].balance, undefined);
+});
