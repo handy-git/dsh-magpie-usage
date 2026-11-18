@@ -227,7 +227,7 @@ window.__ModuleLoader__.load({
     }
 
     function unitName(unit) {
-      return UNIT_NAME_ZH[unit] || '';
+      return UNIT_NAME_ZH[unit] || unit || '';
     }
 
     // 状态栏空间有限：积分省略单位，美元/词元保留单位。
@@ -281,6 +281,20 @@ window.__ModuleLoader__.load({
           rem: avail,
           color: avail < 15 ? '#f87171' : avail < 35 ? '#fbbf24' : '#34d399',
           label: avail >= 99.9 ? '全部可用' : `可用 ${avail}%`,
+        };
+      }
+      // balance 型窗口（QwenWork 等）只有余额值，没有百分比，不能假装成 0%/100%。
+      if (w?.balance) {
+        const value = Number.isFinite(w.limit) ? w.limit : null;
+        return {
+          cooling: false,
+          synthetic: false,
+          balance: true,
+          pct: null,
+          used: null,
+          rem: null,
+          color: value != null && value > 0 ? '#34d399' : '#f87171',
+          label: balanceText(w),
         };
       }
       // holdsWhy 只表示「窗口总量无法估算的原因」（low/clock/log/none/credits），
@@ -417,8 +431,28 @@ window.__ModuleLoader__.load({
       // 上游完全不提供百分比额度时（AI Studio 正常状态下只有「代理出口」「管理页」），
       // 用可用账号数合成一条可用度窗口，避免状态栏空白或误报 0%。
       if (merged.length === 0) {
+        // 只有 balance 字符串的 Provider（QwenWork/Cline 等）：合成一条「余额」窗口。
+        const balances = accounts
+          .filter((a) => !a.error && String(a?.balance || '').trim())
+          .map((a) => balanceWindowOf(a.balance))
+          .filter(Boolean);
+        if (balances.length > 0) {
+          const units = [...new Set(balances.map((w) => w.unit).filter(Boolean))];
+          merged.push({
+            name: '余额',
+            balance: true,
+            used: null,
+            remaining: null,
+            resetsAt: null,
+            amount: 0,
+            limit: balances.reduce((sum, w) => sum + (Number.isFinite(w.limit) ? w.limit : 0), 0),
+            unit: units.length === 1 ? units[0] : undefined,
+            balanceDetail: balances.map((w) => w.balanceDetail).filter(Boolean).join(' · '),
+            accountCount: balances.length,
+          });
+        }
         const reported = accounts.filter((a) => Array.isArray(a.windows) && a.windows.length > 0);
-        if (reported.length > 0) {
+        if (merged.length === 0 && reported.length > 0) {
           merged.push({
             name: '账号可用',
             used: 0,
@@ -444,6 +478,51 @@ window.__ModuleLoader__.load({
       if (!Array.isArray(windows) || windows.length === 0) return null;
       return windows.find(isTotalWindow) ||
         [...windows].sort((a, b) => (b.used || 0) - (a.used || 0))[0];
+    }
+
+    // Magpie 新版对部分 Provider（QwenWork/Cline 等）不再给 windows，只给 balance 字符串，
+    // 如 "2019.97 credits (monthly 100 · long-term 1924.97)"、"$0.00"、"3,376 智点"。
+    function balanceWindowOf(balance) {
+      const raw = String(balance || '').trim();
+      if (!raw) return null;
+      const flat = raw.replace(/,/g, '');
+      const num = /^[$¥]?\s*(\d+(?:\.\d+)?)/.exec(flat);
+      if (!num) return null;
+      const unit = /^\s*\$/.test(flat)
+        ? 'usd'
+        : (/\b(credits|usd|tokens)\b/i.exec(flat)?.[1]?.toLowerCase()
+          || /\d(?:\.\d+)?\s*([^\d()$.]+?)\s*(?:\(|$)/.exec(flat)?.[1]?.trim()
+          || undefined);
+      const detail = /\(([^)]*)\)/.exec(raw)?.[1]?.trim() || '';
+      return {
+        name: '余额',
+        balance: true,
+        used: null,
+        remaining: null,
+        resetsAt: null,
+        amount: 0,
+        limit: parseFloat(num[1]),
+        unit,
+        balanceDetail: detail,
+      };
+    }
+
+    function balanceAmountText(w) {
+      if (!Number.isFinite(w?.limit)) return '';
+      const suffix = w.unit ? ` ${unitName(w.unit)}` : '';
+      return `${formatQuotaNumber(w.limit)}${suffix}`;
+    }
+
+    function balanceText(w) {
+      const amount = balanceAmountText(w);
+      return amount ? `余额 ${amount}` : '余额';
+    }
+
+    function balanceDetailText(w) {
+      return String(w?.balanceDetail || '')
+        .replace(/monthly/gi, '月度')
+        .replace(/long-term/gi, '长期')
+        .trim();
     }
 
     // ----------------------------------------------------
@@ -1016,6 +1095,7 @@ window.__ModuleLoader__.load({
 
       const isCooling = activeWindow?.display === '冷却中';
       const isSynthetic = Boolean(activeWindow?.synthetic);
+      const isBalance = Boolean(activeWindow?.balance);
       const usedPct = activeWindow && Number.isFinite(activeWindow.used) ? Math.round(activeWindow.used) : 0;
       const remainPct = activeWindow && Number.isFinite(activeWindow.remaining) ? Math.round(activeWindow.remaining) : 0;
 
@@ -1024,15 +1104,19 @@ window.__ModuleLoader__.load({
         ? (viewMode === 'used' ? 100 : 0)
         : isSynthetic
           ? remainPct
-          : (viewMode === 'used' ? usedPct : remainPct);
+          : isBalance
+            ? 100
+            : (viewMode === 'used' ? usedPct : remainPct);
 
       const barColor = tone(isCooling
         ? '#f87171'
         : isSynthetic
           ? (remainPct < 15 ? '#f87171' : remainPct < 35 ? '#fbbf24' : '#34d399')
-          : (viewMode === 'used'
-              ? (usedPct > 85 ? '#f87171' : usedPct > 65 ? '#fbbf24' : getBrandColor(activeItem?.provider))
-              : (remainPct < 15 ? '#f87171' : remainPct < 35 ? '#fbbf24' : '#34d399')));
+          : isBalance
+            ? getBrandColor(activeItem?.provider)
+            : (viewMode === 'used'
+                ? (usedPct > 85 ? '#f87171' : usedPct > 65 ? '#fbbf24' : getBrandColor(activeItem?.provider))
+                : (remainPct < 15 ? '#f87171' : remainPct < 35 ? '#fbbf24' : '#34d399')));
 
       const amountText = activeWindow && !isCooling && !isSynthetic
         ? dockRemainingText(activeWindow)
@@ -1043,13 +1127,17 @@ window.__ModuleLoader__.load({
           ? '冷却'
           : isSynthetic
             ? (remainPct >= 99.9 ? '可用' : `可用 ${remainPct}%`)
-            : (amountText ? `${barPct}% · ${amountText}` : `${barPct}%`);
+            : isBalance
+              ? (amountText || '余额')
+              : (amountText ? `${barPct}% · ${amountText}` : `${barPct}%`);
       // 合成窗口说的是「可用度」，标题里不再套「已用/剩余」前缀，避免出现「已用 可用」。
       const titleDetail = !activeWindow
         ? '无可用额度窗口'
         : isSynthetic
           ? (remainPct >= 99.9 ? '全部账号可用' : `可用 ${remainPct}%`)
-          : `(${viewMode === 'used' ? '已用' : '剩余'} ${barPct}%${amountText ? ` · ${remainingOfTotalText(activeWindow)}` : ''})`;
+          : isBalance
+            ? `${balanceText(activeWindow)}${balanceDetailText(activeWindow) ? `（${balanceDetailText(activeWindow)}）` : ''}`
+            : `(${viewMode === 'used' ? '已用' : '剩余'} ${barPct}%${amountText ? ` · ${remainingOfTotalText(activeWindow)}` : ''})`;
 
       const strokeDash = `${(CIRCUMFERENCE * Math.min(100, Math.max(0, barPct))) / 100} ${CIRCUMFERENCE}`;
 
@@ -1173,6 +1261,34 @@ window.__ModuleLoader__.load({
               const cleanName = defaultLabel || (w.synthetic ? '可用' : displayWindowName(w.name));
               const amountText = remainingAmountText(w);
               const timeStr = isCool ? '冷却中' : (w.resetsAt ? `${formatRelative(w.resetsAt)}重置` : '长期');
+
+              if (w.balance) {
+                const detail = balanceDetailText(w);
+                return h('div', {
+                  key: w.name,
+                  style: {
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px',
+                    fontSize: '11px',
+                    lineHeight: '1.4',
+                  },
+                },
+                  h('span', { style: { color: theme.textSecondary, minWidth: '36px' } }, cleanName),
+                  h('span', {
+                    style: {
+                      color,
+                      fontWeight: 600,
+                      fontVariantNumeric: 'tabular-nums',
+                    },
+                  }, balanceAmountText(w)),
+                  detail && h('span', {
+                    style: { color: theme.textTertiary, fontSize: '10px' },
+                  }, detail),
+                  h('span', { style: { color: theme.textTertiary, fontSize: '10px', textAlign: 'right' } }, '长期')
+                );
+              }
 
               return h('div', {
                 key: w.name,
@@ -1426,7 +1542,8 @@ window.__ModuleLoader__.load({
               h('p', { style: { margin: 0, fontSize: '11px', opacity: 0.7 } }, '请确认 Magpie 网关已启动并在 127.0.0.1:3425 运行')
             ) : sortedCards.map((item, idx) => {
               const brandColor = tone(getBrandColor(item.provider));
-              const hasWindows = Array.isArray(item.windows) && item.windows.length > 0;
+              const hasWindows = (Array.isArray(item.windows) && item.windows.length > 0)
+                || Boolean(String(item.balance || '').trim());
               const thisIsPinned = isProviderMatch(item, pinnedProvider);
               // 关键修复：当前会话标签必须只绑定真实会话模型 (sessionProviderItem)，绝不随置顶项漂移！
               const thisIsSessionModel = Boolean(
@@ -1533,19 +1650,26 @@ window.__ModuleLoader__.load({
                     // 上游不提供百分比额度时（Google AI Studio 正常状态下只有服务信息），
                     // 用该 Provider 的可用账号数合成一条状态行，避免卡片中部空白。
                     const providerAccounts = data.filter((d) => isProviderMatch(d, item.provider || item.name));
+                    // 没有百分比窗口但给了 balance 的 Provider（QwenWork 等）：用合成「余额」窗口。
+                    const mergedWindows = quotaWindows.length > 0
+                      ? []
+                      : mergeProviderWindows(providerAccounts);
                     const statusWindows = quotaWindows.length > 0
                       ? quotaWindows
-                      : availabilityWindowsFor(providerAccounts, item);
+                      : (mergedWindows.length > 0 ? mergedWindows : availabilityWindowsFor(providerAccounts, item));
 
                     return [
                       ...statusWindows.map((w, wIdx) => {
                         const st = windowStats(w, viewMode, brandColor);
                         const isCooling = st.cooling;
+                        const isBalanceWin = Boolean(w.balance);
                         const pct = st.pct;
-                        const label = st.label;
+                        const label = isBalanceWin ? balanceAmountText(w) : st.label;
                         const barColor = tone(st.color);
-                        const amountText = remainingAmountText(w);
-                        const amountDetail = remainingOfTotalText(w);
+                        const amountText = isBalanceWin ? '' : remainingAmountText(w);
+                        const amountDetail = isBalanceWin
+                          ? [balanceText(w), balanceDetailText(w)].filter(Boolean).join(' · ')
+                          : remainingOfTotalText(w);
 
                         return h('div', {
                           key: w.name + wIdx,
@@ -1587,8 +1711,8 @@ window.__ModuleLoader__.load({
                               }, amountText)
                             )
                           ),
-                          // 进度条槽
-                          h('div', {
+                          // 进度条槽（balance 型窗口没有百分比，不画进度条）
+                          Number.isFinite(pct) && h('div', {
                             style: {
                               height: '6px',
                               borderRadius: '3px',
@@ -1606,15 +1730,24 @@ window.__ModuleLoader__.load({
                               },
                             })
                           ),
-                          // 倒计时信息
-                          w.resetsAt && h('div', {
-                            style: {
-                              fontSize: '10px',
-                              color: theme.textTertiary,
-                              marginTop: '3px',
-                              textAlign: 'right',
-                            },
-                          }, `重置于 ${formatTime(w.resetsAt)} · ${formatRelative(w.resetsAt)}`)
+                          // 倒计时信息（balance 型窗口显示余额构成明细）
+                          (isBalanceWin
+                            ? (balanceDetailText(w) && h('div', {
+                              style: {
+                                fontSize: '10px',
+                                color: theme.textTertiary,
+                                marginTop: '3px',
+                                textAlign: 'right',
+                              },
+                            }, balanceDetailText(w)))
+                            : (w.resetsAt && h('div', {
+                              style: {
+                                fontSize: '10px',
+                                color: theme.textTertiary,
+                                marginTop: '3px',
+                                textAlign: 'right',
+                              },
+                            }, `重置于 ${formatTime(w.resetsAt)} · ${formatRelative(w.resetsAt)}`)))
                         );
                       }),
                       // 链接与配置信息展示
