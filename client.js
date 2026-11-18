@@ -175,9 +175,13 @@ window.__ModuleLoader__.load({
       'free model tokens': '免费模型额度',
       'add-on credits': '加购积分',
       'dollar usage': '美元用量',
+      'chat requests': '聊天请求',
+      completions: '代码补全',
     };
     const PLAN_NAME_ZH = {
       'free plan': '免费版',
+      free: '免费版',
+      'kiro free': 'Kiro 免费版',
       'personal_standard': '个人标准版',
       'personal_pro': '个人专业版',
       team: '团队版',
