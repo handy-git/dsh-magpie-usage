@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const clientPath = fileURLToPath(new URL('../client.js', import.meta.url));
 const source = readFileSync(clientPath, 'utf8');
 const exposure = `globalThis.review = {
-  windowStats, mergeProviderWindows, windowAmounts,
+  windowStats, mergeProviderWindows, windowAmounts, pickPrimaryWindow, displayWindowName,
   checkActiveSessionModelNow, resolveRouteProvider,
   parseRgb, detectLightTheme, getBrandColor, QuotaDockItem,
   palettes: () => ({ light: LIGHT_THEME, dark: DARK_THEME }),
@@ -54,6 +54,25 @@ function harness() {
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test('daily pool window name is translated', () => {
+  const { api } = harness();
+  assert.equal(api.displayWindowName('Daily pool'), '日池');
+  assert.equal(api.displayWindowName('Chat requests'), '聊天请求');
+});
+
+test('primary window combines equal-unit quota pools', () => {
+  const { api } = harness();
+  const primary = api.pickPrimaryWindow([
+    { name: 'Daily pool', used: 86.95238095238095, remaining: 13.047619047619051, amount: 1826, limit: 2100, unit: 'credits' },
+    { name: 'Credits', used: 0.4126984126984127, remaining: 99.58730158730158, amount: 26, limit: 6300, unit: 'credits' },
+  ]);
+  assert.equal(primary.name, '积分合计');
+  assert.equal(primary.limit, 8400);
+  assert.equal(primary.amount, 1852);
+  assert.equal(api.windowAmounts(primary).remainingAmount, 6548);
+  assert.ok(Math.abs(primary.used - 22.047619047619047) < 0.0001);
+});
 
 test('holdsWhy=clock describes estimation, not cooling (also aggregated)', () => {
   const { api } = harness();

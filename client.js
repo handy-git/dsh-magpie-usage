@@ -175,6 +175,7 @@ window.__ModuleLoader__.load({
       'free model tokens': '免费模型额度',
       'add-on credits': '加购积分',
       'dollar usage': '美元用量',
+      'daily pool': '日池',
       'chat requests': '聊天请求',
       completions: '代码补全',
     };
@@ -480,8 +481,38 @@ window.__ModuleLoader__.load({
 
     function pickPrimaryWindow(windows) {
       if (!Array.isArray(windows) || windows.length === 0) return null;
-      return windows.find(isTotalWindow) ||
-        [...windows].sort((a, b) => (b.used || 0) - (a.used || 0))[0];
+      const total = windows.find(isTotalWindow);
+      if (total) return total;
+
+      const withLimit = windows.filter((w) =>
+        Number.isFinite(w?.limit) && w.limit > 0 &&
+        (Number.isFinite(w?.amount) || Number.isFinite(w?.used))
+      );
+      if (withLimit.length > 1) {
+        const units = [...new Set(withLimit.map((w) => w.unit).filter(Boolean))];
+        if (units.length === 1) {
+          const limit = withLimit.reduce((sum, w) => sum + w.limit, 0);
+          const amount = withLimit.reduce((sum, w) => {
+            if (Number.isFinite(w.amount)) return sum + w.amount;
+            return sum + (w.used * w.limit) / 100;
+          }, 0);
+          const remaining = Math.max(0, limit - amount);
+          return {
+            name: '积分合计',
+            used: limit > 0 ? (amount / limit) * 100 : 0,
+            remaining: limit > 0 ? (remaining / limit) * 100 : 0,
+            limit,
+            amount,
+            unit: units[0],
+            accountCount: 1,
+          };
+        }
+      }
+
+      if (withLimit.length > 0) {
+        return [...withLimit].sort((a, b) => b.limit - a.limit)[0];
+      }
+      return [...windows].sort((a, b) => (b.used || 0) - (a.used || 0))[0];
     }
 
     // Magpie 新版对部分 Provider（QwenWork/Cline 等）不再给 windows，只给 balance 字符串，
