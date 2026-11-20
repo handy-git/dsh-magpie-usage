@@ -94,6 +94,36 @@ test('absolute remaining quota is computed from amount or a known percentage', (
   assert.equal(api.windowAmounts({ limit: 200, used: 25, unit: 'credits' }).remainingAmount, 150);
 });
 
+test('a real per-window balance renders as 余额 (TeleAgent)', () => {
+  const { api } = harness();
+  const wallet = { name: '积分余额', used: 0, remaining: 100, unit: '积分',
+    runsOutAt: '2026-11-30T15:59:59Z', balance: 6076.94, spent: 0.02,
+    spentSince: '2026-11-20T13:10:01.110546+08:00' };
+  const merged = api.mergeProviderWindows([{ provider: 'teleagent', name: 'TeleAgent', windows: [wallet] }]);
+  assert.equal(merged.length, 1);
+  assert.ok(Math.abs(merged[0].balance - 6076.94) < 1e-9, 'wallet balance passes through the merge');
+  assert.equal(merged[0].unit, '积分');
+  const st = api.windowStats(merged[0], 'used', 'brand');
+  assert.equal(st.balance, true);
+  assert.equal(st.pct, null, 'wallet windows carry no percentage');
+  assert.ok(st.label.includes('6,076.9'), `label shows the wallet balance: ${st.label}`);
+  assert.equal(api.windowAmounts(merged[0]).remainingAmount, 6076.94);
+});
+
+test('the wallet balance window outranks sign-in text windows', () => {
+  const { api } = harness();
+  const primary = api.pickPrimaryWindow([
+    { name: '每日签到', used: 0, remaining: 100, display: '今日已签 ✓ +400', text: true },
+    { name: '积分余额', used: 0, remaining: 100, unit: '积分', balance: 20282 },
+    { name: '活动积分', used: 0, remaining: 100, display: '剩 19,482', text: true },
+  ]);
+  assert.equal(primary.name, '积分余额');
+  assert.equal(api.pickPrimaryWindow([
+    { name: 'Credits', used: 10, amount: 100, limit: 1000, unit: 'credits' },
+    { name: '积分余额', used: 0, unit: '积分', balance: 20282 },
+  ]).name, 'Credits');
+});
+
 test('a group route refreshes after its 10-second client TTL', async () => {
   const h = harness();
   h.api.checkActiveSessionModelNow();
